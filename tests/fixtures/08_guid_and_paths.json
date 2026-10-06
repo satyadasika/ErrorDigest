@@ -1,0 +1,8 @@
+{
+  "entry_id": "FIX-008",
+  "subject": "Service fault",
+  "sender": "monitor@example.com",
+  "received": "2026-09-30T07:45:00",
+  "folder": "Inbox\\Alerts\\Prod",
+  "body": "Error: Unable to write report to C:\\Reports\\2026\\out-4471.csv for correlation id 3f2504e0-4f89-11d3-9a0c-0305e82c3301\n"
+}

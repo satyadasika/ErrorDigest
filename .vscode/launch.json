@@ -1,0 +1,55 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run digest (creates the draft)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/error_digest.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Run digest - no draft (ledger only)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/error_digest.py",
+      "args": ["--no-draft"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Dry run - change nothing, just report",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/error_digest.py",
+      "args": ["--dry-run", "--explain"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Test offline (fixtures, no Outlook needed)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/error_digest.py",
+      "args": [
+        "--workbook", "${workspaceFolder}/sandbox.xlsx",
+        "--source", "fixtures",
+        "--fixtures", "${workspaceFolder}/tests/fixtures",
+        "--since", "2026-09-01",
+        "--no-draft", "--explain"
+      ],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Create the workbook (first time)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/error_digest.py",
+      "args": ["--init"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

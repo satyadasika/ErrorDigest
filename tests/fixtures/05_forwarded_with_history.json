@@ -1,0 +1,8 @@
+{
+  "entry_id": "FIX-005",
+  "subject": "FW: PROD ALERT",
+  "sender": "colleague@example.com",
+  "received": "2026-09-29T12:00:00",
+  "folder": "Inbox\\Alerts\\Prod",
+  "body": "Can you look at this one?\n\nException: Invalid routing key for ticket #7781\n\n-----Original Message-----\nFrom: monitor@example.com\nSent: Monday, 28 September 2026 14:02\n\nError Message: Payment gateway timeout: case ID 88421\nException: Something quoted that must not be counted again\n"
+}

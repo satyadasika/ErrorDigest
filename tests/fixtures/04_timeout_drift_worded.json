@@ -1,0 +1,8 @@
+{
+  "entry_id": "FIX-004",
+  "subject": "Batch job failure",
+  "sender": "scheduler@example.com",
+  "received": "2026-09-29T11:00:00",
+  "folder": "Inbox\\Alerts\\Batch",
+  "body": "Error Message: Connection timed out on host SRV-44 after 60 seconds\n"
+}

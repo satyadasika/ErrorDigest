@@ -1,0 +1,8 @@
+{
+  "entry_id": "FIX-003",
+  "subject": "Batch job failure",
+  "sender": "scheduler@example.com",
+  "received": "2026-09-29T10:00:00",
+  "folder": "Inbox\\Alerts\\Batch",
+  "body": "Error Message: Connection timeout on host SRV-12 after 30 seconds\n"
+}

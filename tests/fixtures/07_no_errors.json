@@ -1,0 +1,8 @@
+{
+  "entry_id": "FIX-007",
+  "subject": "Weekly newsletter",
+  "sender": "news@example.com",
+  "received": "2026-09-29T08:00:00",
+  "folder": "Inbox\\Alerts\\Prod",
+  "body": "Nothing to report today. All systems are healthy and no action is required.\n"
+}

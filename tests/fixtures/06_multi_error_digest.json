@@ -1,0 +1,8 @@
+{
+  "entry_id": "FIX-006",
+  "subject": "Nightly summary",
+  "sender": "batch@example.com",
+  "received": "2026-09-29T23:30:00",
+  "folder": "Inbox\\Alerts\\Batch",
+  "body": "Nightly run completed with failures.\n\nError Message: Invalid routing key for ticket #7790\nFATAL Disk quota exceeded on /var/log/app/worker.log\nError Message:\nPayment gateway timeout: case ID 10022\n"
+}

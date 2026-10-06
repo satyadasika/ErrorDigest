@@ -1,0 +1,8 @@
+{
+  "entry_id": "FIX-001",
+  "subject": "PROD ALERT: Payment service",
+  "sender": "monitor@example.com",
+  "received": "2026-09-28T14:02:00",
+  "folder": "Inbox\\Alerts\\Prod",
+  "body": "Automated notification.\n\nError Message: Payment gateway timeout: case ID 88421 at 2026-09-28 14:02\n\nDo not reply to this mailbox.\n"
+}
