@@ -122,6 +122,66 @@ def _child_names(folders) -> str:
     return ", ".join(names) if names else "(none)"
 
 
+def list_folders(max_depth: int = 4) -> list[str]:
+    """Return every mail folder path, the way the Config sheet wants them written.
+
+    Built because the commonest failure on a first run is a folder path that is
+    nearly right — "Inbox\\Alerts" when the real tree has "Inbox\\Alerts\\Prod",
+    or a shared mailbox whose display name differs from what the person calls it.
+    Guessing costs several failed runs; reading the real list costs one command.
+
+    Args:
+        max_depth: How deep to walk. The default covers any realistic alert tree
+            and stops a pathological mailbox from printing thousands of lines.
+
+    Returns:
+        Folder paths, e.g. ["Inbox", "Inbox\\Alerts", "Inbox\\Alerts\\Prod"].
+
+    Raises:
+        OutlookUnavailable: If Outlook cannot be reached.
+    """
+    application = _application()
+    namespace = application.GetNamespace("MAPI")
+    found: list[str] = []
+
+    def walk(folder, prefix: str, depth: int) -> None:
+        """Add this folder's path, then recurse into its children."""
+        found.append(prefix)
+        if depth >= max_depth:
+            return
+        try:
+            children = folder.Folders
+            for index in range(1, children.Count + 1):
+                child = children.Item(index)
+                walk(child, f"{prefix}\\{child.Name}", depth + 1)
+        except Exception:  # pragma: no cover - a folder that refuses to enumerate
+            return
+
+    # The default inbox first, because that is what nearly every path starts with.
+    try:
+        walk(namespace.GetDefaultFolder(OL_FOLDER_INBOX), "Inbox", 1)
+    except Exception:  # pragma: no cover - no default inbox on this profile
+        pass
+
+    # Then every store (other mailboxes, shared mailboxes, PST files), so a path
+    # that does NOT start at Inbox is discoverable too.
+    try:
+        stores = namespace.Folders
+        for index in range(1, stores.Count + 1):
+            store = stores.Item(index)
+            walk(store, store.Name, 1)
+    except Exception:  # pragma: no cover
+        pass
+
+    seen: set[str] = set()
+    unique = []
+    for path in found:
+        if path not in seen:
+            seen.add(path)
+            unique.append(path)
+    return unique
+
+
 def fetch_messages(folder_paths: Iterable[str], since: dt.datetime) -> list[EmailMessage]:
     """Read every mail item received at or after a moment, from each folder.
 

@@ -101,6 +101,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--init", action="store_true",
         help="Create the workbook with default settings, then stop.",
     )
+    parser.add_argument(
+        "--list-folders", action="store_true",
+        help="Print every Outlook folder path, then stop. Copy one into the "
+             "Config sheet's 'folders' setting.",
+    )
     return parser
 
 
@@ -368,6 +373,21 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError) as exc:
         print(f"Could not open {args.workbook}: {exc}", file=sys.stderr)
         return EXIT_FAILED
+
+    if args.list_folders:
+        # Printed before anything else touches the workbook, so this works even
+        # on a machine where nothing has been configured yet.
+        try:
+            paths = outlook_win.list_folders()
+        except outlook_win.OutlookUnavailable as exc:
+            print(f"Could not read your folders: {exc}", file=sys.stderr)
+            return EXIT_FAILED
+        print("Your Outlook folders — copy one of these into the Config sheet:\n")
+        for path in paths:
+            print(f"    {path}")
+        print(f"\n{len(paths)} folder(s). Several folders go one per line in that "
+              "cell (Alt+Enter inside Excel).")
+        return EXIT_OK
 
     if args.init:
         if not args.workbook.exists():
