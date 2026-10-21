@@ -106,6 +106,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print every Outlook folder path, then stop. Copy one into the "
              "Config sheet's 'folders' setting.",
     )
+    parser.add_argument(
+        "--set", action="append", dest="set_values", metavar="KEY=VALUE",
+        help="Change a Config setting without opening Excel. Repeatable, e.g. "
+             "--set folders=\"Inbox\\Alerts\" --set draft_to=me@example.com. "
+             "Separate several folders or addresses with ';'.",
+    )
+    parser.add_argument(
+        "--show-config", action="store_true",
+        help="Print every Config setting and its value, then stop.",
+    )
+    parser.add_argument(
+        "--show-errors", action="store_true",
+        help="Print the Errors ledger as a table, then stop. Reads the workbook, "
+             "so it needs no Excel and no Outlook.",
+    )
+    parser.add_argument(
+        "--show-keywords", action="store_true",
+        help="Print the error-start markers and whether each is enabled, then stop.",
+    )
     return parser
 
 
@@ -373,6 +392,76 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError) as exc:
         print(f"Could not open {args.workbook}: {exc}", file=sys.stderr)
         return EXIT_FAILED
+
+    # ── Terminal-only control surface ─────────────────────────────────────
+    # Everything below exists because the Config and Keywords sheets were the
+    # ONLY way to change a setting, which assumes Excel and a mouse. On a
+    # machine where the terminal is all there is, the tool was unconfigurable
+    # and its results unreadable — so it could be installed and never used.
+    if args.set_values:
+        from workbook import DEFAULT_CONFIG
+
+        known = {key for key, _default, _description in DEFAULT_CONFIG}
+        changes = []
+        for pair in args.set_values:
+            if "=" not in pair:
+                print(f"--set needs KEY=VALUE, got {pair!r}", file=sys.stderr)
+                return EXIT_FAILED
+            key, value = pair.split("=", 1)
+            key, value = key.strip(), value.strip()
+            # An unknown key is REFUSED, never written. Writing it would create a
+            # setting nothing reads, and a typo would look like it had worked.
+            if key not in known:
+                print(f"Unknown setting {key!r}. Valid settings are:", file=sys.stderr)
+                for name in sorted(known):
+                    print(f"    {name}", file=sys.stderr)
+                return EXIT_FAILED
+            changes.append((key, value))
+
+        for key, value in changes:
+            digest.set_config(key, value)
+        try:
+            digest.save(backup=False)
+        except PermissionError:
+            print(f"Could not write {args.workbook} — it is open in Excel. "
+                  "Close it and try again.", file=sys.stderr)
+            return EXIT_FAILED
+        for key, value in changes:
+            print(f"  {key} = {value or '(blank)'}")
+        print(f"\nSaved to {args.workbook}")
+        return EXIT_OK
+
+    if args.show_config:
+        print(f"Config in {args.workbook}:\n")
+        for key, value in digest.config.items():
+            print(f"  {key:28} {value or '(blank)'}")
+        print("\nChange one with:  --set KEY=VALUE")
+        return EXIT_OK
+
+    if args.show_keywords:
+        print(f"Error-start markers in {args.workbook}:\n")
+        for keyword in digest.keywords:
+            mark = "on " if keyword.enabled else "off"
+            print(f"  [{mark}] {keyword.marker}")
+        print("\nAdd or disable markers on the Keywords sheet of the workbook.")
+        return EXIT_OK
+
+    if args.show_errors:
+        rows = sorted(
+            digest._errors.values(),                       # noqa: SLF001
+            key=lambda record: record.total_count, reverse=True,
+        )
+        if not rows:
+            print("No errors recorded yet. Run the digest first.")
+            return EXIT_OK
+        print(f"{'TOTAL':>6}  {'FIRST FOUND':<16}  {'STATUS':<10}  ERROR")
+        print("-" * 96)
+        for record in rows:
+            first = f"{record.first_found:%Y-%m-%d %H:%M}" if record.first_found else "-"
+            text = (record.sample or record.signature)[:52]
+            print(f"{record.total_count:>6}  {first:<16}  {(record.status or ''):<10}  {text}")
+        print(f"\n{len(rows)} distinct error(s).")
+        return EXIT_OK
 
     if args.list_folders:
         # Printed before anything else touches the workbook, so this works even
