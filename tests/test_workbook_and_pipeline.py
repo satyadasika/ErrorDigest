@@ -108,10 +108,18 @@ def test_a_missing_column_is_added_rather_than_losing_the_file(book):
 # -- consolidation ---------------------------------------------------------
 
 def test_errors_consolidate_by_signature(book):
-    """Nine fixture emails collapse to five distinct errors."""
+    """Nine fixture emails collapse to four distinct errors.
+
+    FOUR, not five, since 2026-11-11: max_errors_per_email now defaults to 1.
+    The operator asked for it directly — "check if there is are 2 error words
+    placed in the same email. do we consider them as 2" / "it should not" —
+    because a Pega alert reports ONE failure and then repeats the word inside
+    its payload. The cost is real and is covered by the test below: a genuine
+    digest email bundling several failures needs the setting turned off.
+    """
     assert run(book) == 0
     digest = DigestWorkbook.open(book)
-    assert len(digest.known_signatures) == 5
+    assert len(digest.known_signatures) == 4
 
 
 def test_the_repeated_error_carries_its_count(book):
@@ -121,8 +129,10 @@ def test_the_repeated_error_carries_its_count(book):
     payment = next(
         digest.get_error(s) for s in digest.known_signatures if "payment" in s
     )
-    assert payment.total_count == 3
-    assert len(payment.case_ids) == 3           # 88421, 99110, 10022
+    # TWO, not three: the third occurrence is the second error inside the
+    # bundled nightly digest, which the default no longer reaches.
+    assert payment.total_count == 2
+    assert len(payment.case_ids) == 2           # 88421, 99110
 
 
 def test_first_found_is_the_earliest_email_not_the_run_time(book):
@@ -160,10 +170,10 @@ def test_an_email_with_no_errors_adds_nothing(book):
 
 
 def test_occurrences_record_every_instance(book):
-    """Ten occurrences across five error types."""
+    """Eight occurrences at the default of one error per email."""
     run(book)
     digest = DigestWorkbook.open(book)
-    assert digest.workbook["Occurrences"].max_row - 1 == 10
+    assert digest.workbook["Occurrences"].max_row - 1 == 8
 
 
 # -- the three durability guarantees --------------------------------------
@@ -177,7 +187,7 @@ def test_a_second_run_does_not_double_count(book):
     run(book)
     after_digest = DigestWorkbook.open(book)
     signature = next(s for s in after_digest.known_signatures if "payment" in s)
-    assert after_digest.get_error(signature).total_count == before == 3
+    assert after_digest.get_error(signature).total_count == before == 2
 
 
 def test_user_columns_survive_a_run(book):
@@ -282,14 +292,29 @@ def test_lowering_the_threshold_merges_more(book):
     assert len(DigestWorkbook.open(book).known_signatures) < 5
 
 
-def test_max_errors_per_email_is_honoured(book):
-    """Setting it to 1 takes only the first error from the nightly digest."""
+def test_a_bundled_digest_email_still_works_when_the_setting_is_turned_off(book):
+    """
+    The cost of the new default, and the way back.
+
+    Fixture 06 is a nightly digest carrying three distinct failures. At the
+    default of 1 only its first is read and the disk-quota error is never seen
+    at all. Setting max_errors_per_email to 0 restores every match: 10
+    occurrences and 5 error types rather than 8 and 4. Anyone whose alerts
+    genuinely bundle failures needs this, so it is pinned rather than left as a
+    line in a docstring.
+    """
     error_digest.main(["--workbook", str(book), "--init"])
     digest = DigestWorkbook.open(book)
-    digest.set_config("max_errors_per_email", "1")
+    digest.set_config("max_errors_per_email", "0")
     digest.workbook.save(book)
+
     run(book)
-    assert DigestWorkbook.open(book).workbook["Occurrences"].max_row - 1 == 8
+
+    reopened = DigestWorkbook.open(book)
+    assert reopened.workbook["Occurrences"].max_row - 1 == 10
+    assert len(reopened.known_signatures) == 5
+    assert any("disk quota" in s for s in reopened.known_signatures), (
+        "the bundled email's later errors are exactly what this setting buys")
 
 
 def test_a_custom_keyword_added_by_the_person_works(tmp_path, book):

@@ -37,10 +37,19 @@ def populated(tmp_path):
 
 
 def test_every_error_of_the_run_appears(populated):
-    """The draft must not quietly omit a failure."""
+    """The draft must not quietly omit a failure it was given.
+
+    "Disk quota exceeded" was asserted here until 2026-11-11 and is gone on
+    purpose: it is the SECOND error inside the bundled nightly fixture, and
+    max_errors_per_email now defaults to 1. Its absence is the documented cost
+    of that default, pinned in
+    test_a_bundled_digest_email_still_works_when_the_setting_is_turned_off —
+    not a draft that drops errors.
+    """
     html = error_digest.build_html_digest(populated, WHEN)
     assert "Payment gateway timeout" in html
-    assert "Disk quota exceeded" in html
+    assert "Invalid routing key" in html
+    assert "Connection on host" in html      # see the erosion note below
 
 
 def test_new_errors_are_marked_and_sorted_first(populated):

@@ -245,7 +245,11 @@ def test_the_value_cell_of_a_table_is_read():
     html = ('<table><tr><td>Exception/Error Message</td>'
             '<td>No Active Case Case Number 2</td></tr></table>')
     found = parsing.find_error_texts(parsing.strip_markup(html), KEYWORDS)
-    assert found == [("Error Message", "No Active Case Case Number 2")]
+    # The VALUE is what matters. Which marker is credited changed when markers
+    # were required to begin their line: "Exception" starts the cell, "Error
+    # Message" does not, so the shorter one is now credited. Asserting the
+    # marker here would pin an incidental detail.
+    assert [value for _marker, value in found] == ["No Active Case Case Number 2"]
 
 
 def test_a_compound_label_does_not_leak_into_the_message():
@@ -318,3 +322,26 @@ def test_common_wording_of_one_message_is_that_message():
 def test_common_wording_can_erode_to_nothing_and_says_so():
     """Two unrelated messages share nothing; the caller must handle an empty name."""
     assert parsing.common_wording("alpha beta", "gamma delta") == ""
+
+
+def test_common_wording_can_lose_the_word_that_names_the_failure():
+    """
+    A KNOWN LIMITATION, recorded rather than hidden.
+
+    When two occurrences phrase the failure differently the differing words
+    drop, and sometimes those are the ones that matter:
+
+        "Connection timeout on host SRV-12 after 30 seconds"
+        "Connection timed out on host SRV-44 after 60 seconds"
+            -> "Connection on host after seconds"
+
+    Five of eight words survive, so no "too much was lost" ratio would catch
+    it — what was lost matters more than how much. The Sample Message column
+    sits beside Common Message for exactly this reason, and the Groups
+    override (not yet built) is the intended cure.
+    """
+    eroded = parsing.common_wording(
+        "Connection timeout on host SRV-12 after 30 seconds",
+        "Connection timed out on host SRV-44 after 60 seconds")
+    assert eroded == "Connection on host after seconds"
+    assert "timeout" not in eroded and "timed" not in eroded

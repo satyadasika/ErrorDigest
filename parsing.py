@@ -117,10 +117,22 @@ def strip_markup(body: str) -> str:
     if not body:
         return ""
 
-    text = _SCRIPT_OR_STYLE.sub(" ", body)
-    text = _LINE_TAGS.sub("\n", text)
-    text = _ANY_TAG.sub(" ", text)
-    text = _html.unescape(text)
+    # UNESCAPE BEFORE STRIPPING, AND REPEAT. Pega shows XML to the reader by
+    # escaping it, so the body carries "&lt;/td&gt;" rather than "</td>".
+    # Stripping first and unescaping after turned that escaped markup back into
+    # literal tags once it was too late to remove them — which is why the
+    # operator still saw "</td>", "Time Stamp</td>" and "</pyStepLabel>" in the
+    # ledger after the first fix. Three passes covers double-escaping
+    # (&amp;lt;td&amp;gt;) and stops; a fourth has never been needed.
+    text = body
+    for _ in range(3):
+        before = text
+        text = _SCRIPT_OR_STYLE.sub(" ", text)
+        text = _LINE_TAGS.sub("\n", text)
+        text = _ANY_TAG.sub(" ", text)
+        text = _html.unescape(text)
+        if text == before:
+            break
     # Non-breaking spaces survive unescape as U+00A0 and would defeat \s+.
     text = text.replace("\u00a0", " ").replace("\u200b", "")
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
@@ -227,6 +239,7 @@ def find_error_texts(
     keywords: Sequence[Keyword],
     max_errors: int = 0,
     max_chars: int = 0,
+    must_start_line: bool = True,
 ) -> list[tuple[str, str]]:
     """Find every configured error marker in a body and return what follows.
 
@@ -242,6 +255,10 @@ def find_error_texts(
         body: Body text, normally already passed through strip_reply_chain().
         keywords: Configured markers; disabled ones are ignored.
         max_errors: Maximum matches to return.  0 means no limit.
+        must_start_line: Require the marker to BEGIN its line, which is what a
+            label cell or a labelled line looks like. Without it, the word
+            "Error" occurring anywhere inside an embedded payload starts a new
+            "error" — the operator saw several per email from one alert.
         max_chars: Trim each message to this many characters.  0 means no trim.
             A Pega alert can carry kilobytes of embedded case data after the
             sentence that names the failure, and that tail is payload, not
@@ -273,6 +290,8 @@ def find_error_texts(
         for marker, pattern in compiled:
             match = pattern.search(line)
             if not match:
+                continue
+            if must_start_line and match.start() != 0:
                 continue
 
             remainder = line[match.end():]

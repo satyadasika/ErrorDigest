@@ -51,8 +51,14 @@ DEFAULT_CONFIG: tuple[tuple[str, str, str], ...] = (
      "Used only when last_run is empty - how far back the very first run reaches."),
     ("strip_reply_chain", "yes",
      "yes = ignore quoted history in forwarded or replied alerts."),
-    ("max_errors_per_email", "0",
-     "0 = count every marker found. 1 = only the first error in each email."),
+    ("max_errors_per_email", "1",
+     "How many errors to take from one email. 1 (default) = only the first, "
+     "which is right when an alert reports ONE failure and merely mentions the "
+     "word again in its payload. 0 = take every marker found, for digest mails "
+     "that genuinely bundle several failures."),
+    ("marker_must_start_line", "yes",
+     "yes = a marker only counts when it BEGINS a line, which is what a label "
+     "cell looks like. no = match the marker anywhere in a line (noisier)."),
     ("id_labels",
      "case, ticket, incident, request, correlation, transaction, job, order, "
      "reference, ref, session, batch, trace, record, invoice, claim, message, event",

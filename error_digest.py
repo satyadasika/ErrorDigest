@@ -162,7 +162,8 @@ def process_messages(
     keywords = digest.keywords
     threshold = digest.get_float("fuzzy_threshold", 0.90)
     strip_replies = digest.get_bool("strip_reply_chain", True)
-    max_per_email = digest.get_int("max_errors_per_email", 0)
+    max_per_email = digest.get_int("max_errors_per_email", 1)
+    must_start = digest.get_bool("marker_must_start_line", True)
     id_labels = digest.get_list("id_labels")
     max_chars = digest.get_int("max_error_chars", 400)
 
@@ -182,7 +183,8 @@ def process_messages(
             body = strip_reply_chain(body)
 
         for _marker, error_text in find_error_texts(
-                body, keywords, max_per_email, max_chars=max_chars):
+                body, keywords, max_per_email, max_chars=max_chars,
+                must_start_line=must_start):
             signature, case_ids = signature_of(error_text, id_labels or DEFAULT_ID_LABELS)
             if not signature:
                 continue
