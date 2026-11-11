@@ -40,6 +40,31 @@ def run(workbook_path, fixtures=FIXTURES, since="2026-09-01", extra=()):
     ])
 
 
+def col(sheet, header):
+    """Return the 1-based column number of a header, by NAME.
+
+    These tests addressed columns by POSITION and two of them broke the moment
+    a column was inserted — while the production code, which looks headers up
+    by name, was unaffected. A test that is more brittle than the code it
+    guards reports a defect that does not exist, so it reads the header row for
+    itself now.
+
+    Args:
+        sheet: The worksheet.
+        header: The column's header text.
+
+    Returns:
+        The column number.
+
+    Raises:
+        AssertionError: If the sheet has no such header.
+    """
+    for number in range(1, sheet.max_column + 1):
+        if str(sheet.cell(row=1, column=number).value or "").strip() == header:
+            return number
+    raise AssertionError(f"no column named {header!r}")
+
+
 @pytest.fixture()
 def book(tmp_path):
     """Return a path for a fresh workbook in a temporary directory."""
@@ -160,25 +185,27 @@ def test_user_columns_survive_a_run(book):
     run(book)
     digest = DigestWorkbook.open(book)
     sheet = digest.workbook["Errors"]
-    sheet.cell(row=2, column=7, value="Open")
-    sheet.cell(row=2, column=8, value="Satya")
-    sheet.cell(row=2, column=9, value="Vendor ticket raised")
+    sheet.cell(row=2, column=col(sheet, "Status"), value="Open")
+    sheet.cell(row=2, column=col(sheet, "Owner"), value="Satya")
+    sheet.cell(row=2, column=col(sheet, "Notes"), value="Vendor ticket raised")
     digest.workbook.save(book)
 
     run(book)
 
     sheet = DigestWorkbook.open(book).workbook["Errors"]
-    assert sheet.cell(row=2, column=7).value == "Open"
-    assert sheet.cell(row=2, column=8).value == "Satya"
-    assert sheet.cell(row=2, column=9).value == "Vendor ticket raised"
+    assert sheet.cell(row=2, column=col(sheet, "Status")).value == "Open"
+    assert sheet.cell(row=2, column=col(sheet, "Owner")).value == "Satya"
+    assert sheet.cell(row=2, column=col(sheet, "Notes")).value == "Vendor ticket raised"
 
 
 def test_first_found_is_never_rewritten(book):
     """Even if the same error arrives again, the original date stands."""
     run(book)
-    original = DigestWorkbook.open(book).workbook["Errors"].cell(row=2, column=5).value
+    sheet = DigestWorkbook.open(book).workbook["Errors"]
+    original = sheet.cell(row=2, column=col(sheet, "First Found")).value
     run(book)
-    assert DigestWorkbook.open(book).workbook["Errors"].cell(row=2, column=5).value == original
+    after = DigestWorkbook.open(book).workbook["Errors"]
+    assert after.cell(row=2, column=col(after, "First Found")).value == original
 
 
 def test_count_this_run_resets_for_an_error_that_did_not_recur(book):
@@ -186,7 +213,7 @@ def test_count_this_run_resets_for_an_error_that_did_not_recur(book):
     run(book)
     run(book)                                   # same emails, all deduped
     sheet = DigestWorkbook.open(book).workbook["Errors"]
-    assert sheet.cell(row=2, column=4).value == 0
+    assert sheet.cell(row=2, column=col(sheet, "Count This Run")).value == 0
 
 
 # -- windowing -------------------------------------------------------------

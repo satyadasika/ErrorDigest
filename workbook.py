@@ -32,7 +32,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from message import to_naive_local
-from parsing import Keyword
+from parsing import Keyword, common_wording
 
 CONFIG_SHEET = "Config"
 KEYWORDS_SHEET = "Keywords"
@@ -57,6 +57,10 @@ DEFAULT_CONFIG: tuple[tuple[str, str, str], ...] = (
      "case, ticket, incident, request, correlation, transaction, job, order, "
      "reference, ref, session, batch, trace, record, invoice, claim, message, event",
      "Words before an identifier. These identifiers are stripped out so the error groups."),
+    ("max_error_chars", "400",
+     "Trim each error message to this many characters before grouping. A Pega "
+     "alert carries kilobytes of case data after the sentence that names the "
+     "failure; that tail is payload, not identity. 0 = no trim."),
     ("draft_to", "", "Recipients of the digest draft, separated by ';'."),
     ("draft_cc", "", "Cc of the digest draft, separated by ';'."),
     ("draft_subject", "Error Digest {date} - {new} new, {recurring} recurring",
@@ -78,6 +82,7 @@ DEFAULT_KEYWORDS: tuple[tuple[str, str, str], ...] = (
 # Machine columns are rewritten every run.  User columns are never touched.
 ERROR_HEADERS: tuple[str, ...] = (
     "Signature",        # machine
+    "Common Message",   # machine - the wording every occurrence shares
     "Sample Message",   # machine
     "Total Count",      # machine
     "Count This Run",   # machine
@@ -110,6 +115,8 @@ class ErrorRow:
 
     Attributes:
         signature: The normalized grouping key.
+        common: The wording shared by every occurrence — the group's name.
+            Narrows as occurrences arrive; see parsing.common_wording.
         sample: Verbatim text of the first occurrence ever seen.
         total_count: All-time number of occurrences.
         first_found: When this error was first seen.
@@ -124,6 +131,7 @@ class ErrorRow:
     """
 
     signature: str
+    common: str
     sample: str
     total_count: int
     first_found: dt.datetime | None
@@ -345,6 +353,7 @@ class DigestWorkbook:
             signature = str(signature).strip()
             self._errors[signature] = ErrorRow(
                 signature=signature,
+                common=str(sheet.cell(row=row, column=index["Common Message"]).value or ""),
                 sample=str(sheet.cell(row=row, column=index["Sample Message"]).value or ""),
                 total_count=_as_int(sheet.cell(row=row, column=index["Total Count"]).value),
                 first_found=_as_datetime(sheet.cell(row=row, column=index["First Found"]).value),
@@ -422,6 +431,25 @@ class DigestWorkbook:
         record = self._errors.get(signature)
         return record.stored_run_count if record else 0
 
+    def display_name(self, record: "ErrorRow") -> str:
+        """The name to show for an error.
+
+        The shared wording when there is enough of it, otherwise the verbatim
+        sample. Two words is the floor: a group whose members share only "the
+        error" has not been named, it has been eroded, and showing one real
+        message beats showing a fragment that describes nothing.
+
+        Args:
+            record: The ledger row.
+
+        Returns:
+            Text for a person to read.
+        """
+        common = (record.common or "").strip()
+        if len(common.split()) >= 2:
+            return common
+        return record.sample or record.signature
+
     def rows_this_run(self) -> list[ErrorRow]:
         """Return the ledger rows that had at least one occurrence this run.
 
@@ -484,6 +512,7 @@ class DigestWorkbook:
         if existing is None:
             self._errors[signature] = ErrorRow(
                 signature=signature,
+                common=sample_text.strip(),
                 sample=sample_text,
                 total_count=1,
                 first_found=received,
@@ -496,6 +525,10 @@ class DigestWorkbook:
             self._new_signatures.add(signature)
         else:
             existing.total_count += 1
+            # Narrow the shared wording with every occurrence. Done here rather
+            # than recomputed from history so the cost never grows with the
+            # number of occurrences.
+            existing.common = common_wording(existing.common or existing.sample, sample_text)
             if existing.last_seen is None or received > existing.last_seen:
                 existing.last_seen = received
             if existing.first_found is None or received < existing.first_found:
@@ -614,6 +647,7 @@ class DigestWorkbook:
                 record.excel_row = row
                 sheet.cell(row=row, column=index["Signature"], value=signature)
                 sheet.cell(row=row, column=index["Sample Message"], value=record.sample)
+                sheet.cell(row=row, column=index["Common Message"], value=record.common)
                 sheet.cell(row=row, column=index["Status"], value=record.status or "New")
                 first_cell = sheet.cell(row=row, column=index["First Found"],
                                         value=record.first_found)
@@ -628,6 +662,7 @@ class DigestWorkbook:
             if run_count == 0 and signature not in self._new_signatures:
                 continue  # untouched this run - leave the row exactly as it is
 
+            sheet.cell(row=row, column=index["Common Message"], value=record.common)
             sheet.cell(row=row, column=index["Total Count"], value=record.total_count)
             sheet.cell(row=row, column=index["Count This Run"], value=run_count)
             last_cell = sheet.cell(row=row, column=index["Last Seen"], value=record.last_seen)
@@ -709,7 +744,7 @@ def _build_new_workbook() -> Workbook:
 
     errors = workbook.create_sheet(ERRORS_SHEET)
     _write_header(errors, ERROR_HEADERS, user_columns=USER_OWNED_COLUMNS)
-    _set_widths(errors, (58, 68, 12, 14, 18, 18, 14, 16, 42, 30, 26, 18))
+    _set_widths(errors, (52, 62, 56, 12, 14, 18, 18, 14, 16, 42, 30, 26, 18))
     errors.freeze_panes = "A2"
 
     occurrences = workbook.create_sheet(OCCURRENCES_SHEET)

@@ -219,3 +219,102 @@ def test_id_labels_are_configurable():
     """The workbook can add a label the default list does not carry."""
     _, ids = extract_ids("failed for workorder 55", labels=["workorder"])
     assert ids == ["55"]
+
+
+# -- markup, compound labels, and the group's common wording ---------------
+# Added 2026-11-11 after the operator's real ledger was topped by markup:
+# "</td>" 21 occurrences, "</pyStepLabel>" 20, "to Appear</CaseStatus>" 17.
+
+def test_closing_tags_are_not_errors():
+    """The exact rows that topped the real ledger must not be recordable."""
+    for junk in ("</td>", "</pyStepLabel>", "</pyLastFlowStepLabel>", "&nbsp;", "<br/>"):
+        assert parsing.is_markup_only(junk), junk
+
+
+def test_a_real_message_is_not_markup():
+    assert not parsing.is_markup_only("Lock Issue: WORK-1 is currently being processed")
+
+
+def test_a_two_column_table_puts_label_and_value_on_separate_lines():
+    html = ('<table><tr><td>Exception/Error Message</td>'
+            '<td>No Active Case Case Number 2</td></tr></table>')
+    assert parsing.strip_markup(html) == "Exception/Error Message\nNo Active Case Case Number 2"
+
+
+def test_the_value_cell_of_a_table_is_read():
+    html = ('<table><tr><td>Exception/Error Message</td>'
+            '<td>No Active Case Case Number 2</td></tr></table>')
+    found = parsing.find_error_texts(parsing.strip_markup(html), KEYWORDS)
+    assert found == [("Error Message", "No Active Case Case Number 2")]
+
+
+def test_a_compound_label_does_not_leak_into_the_message():
+    """'Exception/Error' left '/Error' behind and it was stored as an error."""
+    text = parsing.strip_markup("<table><tr><td>Exception/Error</td><td>Boom happened</td></tr></table>")
+    found = parsing.find_error_texts(text, KEYWORDS)
+    assert found and found[0][1] == "Boom happened"
+    assert not any(t.strip("/ ").lower() in {"error", "exception"} for _m, t in found)
+
+
+def test_the_value_keeps_its_first_word_even_when_that_word_is_a_marker():
+    """'Error occured during...' must not become 'occured during...'."""
+    text = parsing.strip_markup(
+        "<table><tr><td>Exception/Error</td>"
+        "<td>Error occured during document generation 4534 3434</td></tr></table>")
+    found = parsing.find_error_texts(text, KEYWORDS)
+    assert found[0][1].startswith("Error occured during document generation")
+    assert len(found) == 1, f"the value line was scanned twice: {found}"
+
+
+def test_embedded_xml_keeps_its_words_and_loses_its_tags():
+    out = parsing.strip_markup("No Active Case <something>asasas</something> sequence 9")
+    assert "asasas" in out and "<" not in out
+
+
+def test_long_messages_still_group__autojunk():
+    """
+    difflib's autojunk ignores every character occurring in >1% of a sequence
+    longer than 200 chars. On an XML payload that is nearly every character, so
+    two occurrences of ONE error measured 0.775 against a true 0.958 and each
+    opened its own ledger row. Short messages were unaffected, which is why it
+    went unseen.
+    """
+    pad = ("<Request><Header><System>CRM</System><Version>4.2</Version>"
+           "<Timestamp>2026-11-11T09:00:00</Timestamp><Correlation>abc-def-ghi</Correlation>"
+           "</Header><Body><Account>{a}</Account><Branch>{b}</Branch>"
+           "<Operator>SVC_USER</Operator><Channel>BATCH</Channel>"
+           "<Originator>UPSTREAM</Originator></Body></Request>")
+    one, _ = signature_of("No Active Case Case Number 2 " + pad.format(a="88421", b="LONDON"))
+    two, _ = signature_of("No Active Case Case Number 7 " + pad.format(a="99110", b="PARIS"))
+    assert len(one) > 200, "the bug only appears past difflib's 200-character threshold"
+    assert similarity(one, two) >= 0.90
+    assert best_match(two, [one], 0.90)[0] == one
+
+
+def test_common_wording_gives_the_operators_names():
+    """Their own four examples, verbatim."""
+    cases = [
+        (["No Active Case Case Number 2 sequence 32",
+          "No Active Case Case 3 something else",
+          "No Active Case <something>asasas</something> sequence 9"], "No Active Case"),
+        (["Process Failed for Case 123 something something as requestor lock",
+          "Process Failed for Case 45435 sfdfomething fdfsomething as requestor lock"],
+         "Process Failed for Case as requestor lock"),
+        (["Error occured during document generation 45345345345 343453455",
+          "Error occured during document generation 5546745 3453435345 fgdfg"],
+         "Error occured during document generation"),
+    ]
+    for messages, expected in cases:
+        name = messages[0]
+        for message in messages[1:]:
+            name = parsing.common_wording(name, message)
+        assert name == expected, f"{messages[0][:30]}... -> {name!r}"
+
+
+def test_common_wording_of_one_message_is_that_message():
+    assert parsing.common_wording("", "Only one so far") == "Only one so far"
+
+
+def test_common_wording_can_erode_to_nothing_and_says_so():
+    """Two unrelated messages share nothing; the caller must handle an empty name."""
+    assert parsing.common_wording("alpha beta", "gamma delta") == ""

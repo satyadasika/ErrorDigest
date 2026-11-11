@@ -22,6 +22,7 @@ The pipeline, in order:
 
 from __future__ import annotations
 
+import html as _html
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -47,7 +48,10 @@ class Keyword:
 
 
 # Separators allowed between a marker and the error text itself.
-_MARKER_SEPARATOR = re.compile(r"^\s*[:\-–—>|]*\s*")
+# "/" matters: a label cell reading "Exception/Error" left "/Error" behind and
+# that was stored as an error in its own right, twice, in the operator's real
+# ledger. "," and ";" appear in the same role.
+_MARKER_SEPARATOR = re.compile(r"^\s*[:\-–—>|/,;]*\s*")
 
 
 def _marker_pattern(marker: str) -> re.Pattern[str]:
@@ -66,6 +70,85 @@ def _marker_pattern(marker: str) -> re.Pattern[str]:
         r"(?<![A-Za-z])" + re.escape(marker.strip()) + r"(?![A-Za-z])",
         re.IGNORECASE,
     )
+
+
+# --------------------------------------------------------------------------
+# Markup
+# --------------------------------------------------------------------------
+
+# Tags whose END means a new line of text: table cells and rows, breaks, blocks.
+# Converting these to newlines BEFORE dropping the rest is what makes a
+# two-column table readable — "<td>Error Message</td><td>No Active Case</td>"
+# becomes two lines, and the existing "marker alone on its line -> take the next
+# line" rule then picks the value out of the right-hand cell with no new logic.
+_LINE_TAGS = re.compile(
+    r"</?\s*(?:td|th|tr|table|tbody|thead|br|p|div|li|ul|ol|h[1-6])\b[^>]*>",
+    re.IGNORECASE,
+)
+_ANY_TAG = re.compile(r"<[^>]{0,400}>")
+_SCRIPT_OR_STYLE = re.compile(r"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+# A fragment that is only markup, punctuation or entity noise is not an error.
+_HAS_LETTERS = re.compile(r"[A-Za-z]")
+
+
+def strip_markup(body: str) -> str:
+    """Turn an HTML/XML-bearing body into plain lines of text.
+
+    WHY THIS EXISTS, from the operator's own ledger on 2026-11-11: their Pega
+    alerts carry case data as markup inside the body, so a line scan hit a
+    marker somewhere in the soup and took the rest of the line. The top rows of
+    the Errors sheet were "</td>" (21 occurrences), "</pyStepLabel>" (20),
+    "to Appear</CaseStatus>" (17) and a raw <table border="1" ...> fragment —
+    markup counted and ranked as though it were a failure.
+
+    Tags that END a visual line become newlines first, so a table's cells land
+    on separate lines; every other tag is removed; entities are decoded. The
+    words inside custom XML tags are KEPT (<something>asasas</something> ->
+    asasas), because the error phrase often sits inside them and whatever is
+    merely payload drops out later when the group's common wording is taken.
+
+    Args:
+        body: The raw body, which may be plain text, HTML, XML, or a mixture.
+
+    Returns:
+        Plain text with line structure preserved. Input with no markup is
+        returned with only its entities decoded and its blank runs collapsed.
+    """
+    if not body:
+        return ""
+
+    text = _SCRIPT_OR_STYLE.sub(" ", body)
+    text = _LINE_TAGS.sub("\n", text)
+    text = _ANY_TAG.sub(" ", text)
+    text = _html.unescape(text)
+    # Non-breaking spaces survive unescape as U+00A0 and would defeat \s+.
+    text = text.replace("\u00a0", " ").replace("\u200b", "")
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def is_markup_only(text: str) -> bool:
+    """Report whether a fragment carries no readable words.
+
+    Used to refuse an extracted "error" that is really a stray tag or a run of
+    punctuation. Refusing is the right answer rather than storing it and hoping
+    a person notices: a junk row with 21 occurrences outranks real failures in
+    the digest.
+
+    Args:
+        text: A candidate error message.
+
+    Returns:
+        True when there is nothing worth recording.
+    """
+    if not text or not text.strip():
+        return True
+    cleaned = _ANY_TAG.sub(" ", text)
+    cleaned = _html.unescape(cleaned)
+    letters = _HAS_LETTERS.findall(cleaned)
+    # Two letters is not a sentence; "td", "br" and "p" are all shorter than the
+    # shortest real message seen in the operator's ledger.
+    return len(letters) < 3
 
 
 # --------------------------------------------------------------------------
@@ -112,10 +195,38 @@ def strip_reply_chain(body: str) -> str:
 # Finding the error text
 # --------------------------------------------------------------------------
 
+def _eat_label_run(text: str, compiled: Sequence[tuple[str, "re.Pattern[str]"]]) -> str:
+    """Consume any further label words that are part of the same label.
+
+    "Exception/Error Message: X" is ONE label followed by X, not the label
+    "Exception" followed by "/Error Message: X". This walks forward while the
+    text still begins with a separator and another known marker.
+
+    Args:
+        text: What follows the marker that matched, separator already trimmed.
+        compiled: The (marker, pattern) pairs, longest first.
+
+    Returns:
+        The text with the rest of the label removed.
+    """
+    for _ in range(4):          # four joined labels is already far-fetched
+        progressed = False
+        for _marker, pattern in compiled:
+            match = pattern.match(text)
+            if match and match.start() == 0:
+                text = _MARKER_SEPARATOR.sub("", text[match.end():]).strip()
+                progressed = True
+                break
+        if not progressed:
+            return text
+    return text
+
+
 def find_error_texts(
     body: str,
     keywords: Sequence[Keyword],
     max_errors: int = 0,
+    max_chars: int = 0,
 ) -> list[tuple[str, str]]:
     """Find every configured error marker in a body and return what follows.
 
@@ -131,6 +242,10 @@ def find_error_texts(
         body: Body text, normally already passed through strip_reply_chain().
         keywords: Configured markers; disabled ones are ignored.
         max_errors: Maximum matches to return.  0 means no limit.
+        max_chars: Trim each message to this many characters.  0 means no trim.
+            A Pega alert can carry kilobytes of embedded case data after the
+            sentence that names the failure, and that tail is payload, not
+            identity.
 
     Returns:
         A list of (marker, error_text) pairs in the order they appear.  Empty
@@ -145,8 +260,16 @@ def find_error_texts(
 
     lines = body.splitlines()
     found: list[tuple[str, str]] = []
+    # Lines already consumed as the VALUE of a label on an earlier line. In a
+    # two-column table the label and its value are separate lines, and the value
+    # must be taken WHOLE: scanning it again strips its first word whenever that
+    # word is itself a marker, turning "Error occured during document
+    # generation" into "occured during document generation".
+    taken: set[int] = set()
 
     for index, line in enumerate(lines):
+        if index in taken:
+            continue
         for marker, pattern in compiled:
             match = pattern.search(line)
             if not match:
@@ -156,9 +279,26 @@ def find_error_texts(
             remainder = _MARKER_SEPARATOR.sub("", remainder).strip()
 
             if not remainder:
-                remainder = _next_non_empty(lines, index + 1)
+                value_index = _next_non_empty_index(lines, index + 1)
+                if value_index is not None:
+                    remainder = lines[value_index].strip()
+                    taken.add(value_index)
 
-            if remainder:
+            # A LABEL CAN BE A RUN OF LABELS. "Exception/Error Message:" is one
+            # label, but longest-first matching takes "Exception" and leaves
+            # "/Error Message: ..." as the message. Measured on the real string:
+            # "Exception/Error: X" came out as "/Error: X". So keep eating any
+            # further markers joined by a separator before reading the value.
+            remainder = _eat_label_run(remainder, compiled)
+            if not remainder:
+                value_index = _next_non_empty_index(lines, index + 1)
+                if value_index is not None:
+                    remainder = lines[value_index].strip()
+                    taken.add(value_index)
+
+            if remainder and not is_markup_only(remainder):
+                if max_chars and len(remainder) > max_chars:
+                    remainder = remainder[:max_chars].rstrip()
                 found.append((marker, remainder))
                 if max_errors and len(found) >= max_errors:
                     return found
@@ -167,21 +307,23 @@ def find_error_texts(
     return found
 
 
-def _next_non_empty(lines: Sequence[str], start: int) -> str:
-    """Return the first non-blank line at or after an index.
+def _next_non_empty_index(lines: Sequence[str], start: int) -> int | None:
+    """Return the index of the first non-blank line at or after a position.
+
+    The INDEX rather than the text, so the caller can mark that line consumed
+    and not scan it again as a line in its own right.
 
     Args:
         lines: All body lines.
         start: Index to begin looking from.
 
     Returns:
-        The stripped line, or "" if every remaining line is blank.
+        The index, or None if every remaining line is blank.
     """
-    for line in lines[start:]:
-        stripped = line.strip()
-        if stripped:
-            return stripped
-    return ""
+    for offset, line in enumerate(lines[start:]):
+        if line.strip():
+            return start + offset
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -448,6 +590,52 @@ def signature_of(
 # Fuzzy grouping
 # --------------------------------------------------------------------------
 
+def common_wording(left: str, right: str) -> str:
+    """Return only the words the two messages share, in order.
+
+    THE GROUP'S NAME, as the operator described it: "we take the message
+    Process Failed for case as requestor lock. we remove things which are not
+    common." Whatever differs between occurrences — case numbers, sequence
+    numbers, operator names, the contents of XML tags — is by definition not
+    part of what the error IS, so it falls out on its own without anybody
+    listing what to strip.
+
+    Measured on the operator's own examples:
+        "No Active Case Case Number 2 sequence 32"
+        "No Active Case Case 3 something else"            -> "No Active Case"
+        "No Active Case <something>asasas</something>..."
+
+        "Process Failed for Case 123 ... as requestor lock"
+        "Process Failed for Case 45435 ... as requestor lock"
+            -> "Process Failed for Case as requestor lock"
+
+    Applied one occurrence at a time, so the name narrows as evidence arrives
+    and never has to be recomputed from history.
+
+    Args:
+        left: The wording so far (or the first message seen).
+        right: A new occurrence of the same error.
+
+    Returns:
+        The shared wording. Can be empty if the two share nothing, which the
+        caller must treat as "no usable name" rather than as a name.
+    """
+    if not left:
+        return (right or "").strip()
+    if not right:
+        return left.strip()
+
+    first, second = left.split(), right.split()
+    kept: list[str] = []
+    # autojunk=False for the same reason as similarity(): a long message is
+    # mostly "popular" tokens, and the heuristic would discard the very words
+    # the two messages have in common.
+    matcher = SequenceMatcher(None, first, second, autojunk=False)
+    for block in matcher.get_matching_blocks():
+        kept.extend(first[block.a:block.a + block.size])
+    return " ".join(kept).strip()
+
+
 def similarity(left: str, right: str) -> float:
     """Return how alike two signatures are, from 0.0 to 1.0.
 
@@ -465,7 +653,15 @@ def similarity(left: str, right: str) -> float:
         return 0.0
     if left == right:
         return 1.0
-    return SequenceMatcher(None, left, right).ratio()
+    # autojunk=False IS NOT OPTIONAL HERE, and leaving it at difflib's default
+    # was a real defect. The heuristic treats any character occurring in more
+    # than 1% of a sequence longer than 200 characters as junk and ignores it.
+    # An error message carrying an XML payload is well over 200 characters and
+    # is mostly such characters, so the ratio collapses: two occurrences of ONE
+    # error measured 0.775 where the true ratio is 0.958, fell under the 0.90
+    # threshold, and each occurrence opened its own ledger row for ever.
+    # Short messages were unaffected, which is exactly why it went unnoticed.
+    return SequenceMatcher(None, left, right, autojunk=False).ratio()
 
 
 def best_match(
@@ -498,7 +694,10 @@ def best_match(
 
     best_signature: str | None = None
     best_ratio = 0.0
-    matcher = SequenceMatcher(None)
+    # autojunk=False for the same reason as in similarity() — see the note
+    # there. The two must agree, or --explain would print a ratio the matcher
+    # did not act on.
+    matcher = SequenceMatcher(None, autojunk=False)
     matcher.set_seq2(signature)
 
     for candidate in known_list:

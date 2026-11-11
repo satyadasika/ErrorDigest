@@ -41,6 +41,7 @@ from parsing import (
     best_match,
     find_error_texts,
     signature_of,
+    strip_markup,
     strip_reply_chain,
 )
 from workbook import DigestWorkbook
@@ -163,6 +164,7 @@ def process_messages(
     strip_replies = digest.get_bool("strip_reply_chain", True)
     max_per_email = digest.get_int("max_errors_per_email", 0)
     id_labels = digest.get_list("id_labels")
+    max_chars = digest.get_int("max_error_chars", 400)
 
     stats = {"emails_read": 0, "emails_skipped": 0, "occurrences": 0, "new_errors": 0}
 
@@ -172,9 +174,15 @@ def process_messages(
             continue
 
         stats["emails_read"] += 1
-        body = strip_reply_chain(message.body) if strip_replies else message.body
+        # MARKUP FIRST. The body may be HTML, or plain text with XML embedded in
+        # it, and a line scan over raw markup reads closing tags as errors — the
+        # operator's ledger on 2026-11-11 was topped by "</td>" at 21 occurrences.
+        body = strip_markup(message.body)
+        if strip_replies:
+            body = strip_reply_chain(body)
 
-        for _marker, error_text in find_error_texts(body, keywords, max_per_email):
+        for _marker, error_text in find_error_texts(
+                body, keywords, max_per_email, max_chars=max_chars):
             signature, case_ids = signature_of(error_text, id_labels or DEFAULT_ID_LABELS)
             if not signature:
                 continue
@@ -278,7 +286,7 @@ def build_html_digest(digest: DigestWorkbook, generated_at: dt.datetime) -> str:
                 first_found = f"<b>{first_found} (NEW)</b>"
             cells.append(
                 "<tr>"
-                f"<td style='{_TD}'>{html.escape(_display_text(record))}</td>"
+                f"<td style='{_TD}'>{html.escape(_group_name(digest, record))}</td>"
                 f"<td style='{_TD_NUM}'>{digest.count_this_run(record.signature)}</td>"
                 f"<td style='{_TD_NUM}'>{record.total_count}</td>"
                 f"<td style='{_TD}'>{first_found}</td>"
@@ -337,6 +345,20 @@ def _display_text(record) -> str:
         Text for the Error column, trimmed to a readable length.
     """
     text = record.sample or record.signature
+    return text if len(text) <= 160 else text[:157] + "..."
+
+
+def _group_name(digest, record) -> str:
+    """The group's name for the digest table.
+
+    Args:
+        digest: The open workbook.
+        record: The ledger row.
+
+    Returns:
+        The shared wording, or a trimmed sample when there is too little of it.
+    """
+    text = digest.display_name(record)
     return text if len(text) <= 160 else text[:157] + "..."
 
 
@@ -506,7 +528,7 @@ def main(argv: list[str] | None = None) -> int:
         print("-" * 96)
         for record in rows:
             first = f"{record.first_found:%Y-%m-%d %H:%M}" if record.first_found else "-"
-            text = (record.sample or record.signature)[:52]
+            text = digest.display_name(record)[:52]
             print(f"{record.total_count:>6}  {first:<16}  {(record.status or ''):<10}  {text}")
         print(f"\n{len(rows)} distinct error(s).")
         return EXIT_OK
