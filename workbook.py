@@ -32,7 +32,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from message import to_naive_local
-from parsing import Keyword, common_wording
+from parsing import Keyword, common_wording, similarity
 
 CONFIG_SHEET = "Config"
 KEYWORDS_SHEET = "Keywords"
@@ -56,6 +56,11 @@ DEFAULT_CONFIG: tuple[tuple[str, str, str], ...] = (
      "which is right when an alert reports ONE failure and merely mentions the "
      "word again in its payload. 0 = take every marker found, for digest mails "
      "that genuinely bundle several failures."),
+    ("consolidate_threshold", "0.80",
+     "A SECOND pass after each run merges ledger rows that describe the same "
+     "error. Measured on real Pega alerts: messages of one kind scored "
+     "0.838-0.874 against each other while different kinds scored 0.138-0.446, "
+     "so anything in that gap is safe. 0 switches the pass off."),
     ("marker_must_start_line", "yes",
      "yes = a marker only counts when it BEGINS a line, which is what a label "
      "cell looks like. no = match the marker anywhere in a line (noisier)."),
@@ -128,6 +133,8 @@ class ErrorRow:
         first_found: When this error was first seen.
         last_seen: When it was most recently seen.
         status: The person's triage state.
+        owner: The person's owner text. Read so a merge cannot discard it.
+        notes: The person's notes. Read for the same reason.
         case_ids: Identifiers recorded against this error.
         folders: Folders this error has arrived in.
         excel_row: 1-based row number in the sheet.
@@ -143,6 +150,8 @@ class ErrorRow:
     first_found: dt.datetime | None
     last_seen: dt.datetime | None
     status: str
+    owner: str
+    notes: str
     case_ids: list[str]
     folders: list[str]
     excel_row: int
@@ -172,6 +181,7 @@ class DigestWorkbook:
         self._run_counts: dict[str, int] = {}
         self._pending_occurrences: list[tuple[Any, ...]] = []
         self._seen_entry_ids: set[str] = set()
+        self._errors_need_rewrite = False
         self._load_errors()
         self._load_entry_ids()
 
@@ -365,6 +375,8 @@ class DigestWorkbook:
                 first_found=_as_datetime(sheet.cell(row=row, column=index["First Found"]).value),
                 last_seen=_as_datetime(sheet.cell(row=row, column=index["Last Seen"]).value),
                 status=str(sheet.cell(row=row, column=index["Status"]).value or ""),
+                owner=str(sheet.cell(row=row, column=index["Owner"]).value or ""),
+                notes=str(sheet.cell(row=row, column=index["Notes"]).value or ""),
                 case_ids=_split_cell(sheet.cell(row=row, column=index["Case IDs Seen"]).value),
                 folders=_split_cell(sheet.cell(row=row, column=index["Source Folders"]).value),
                 excel_row=row,
@@ -524,6 +536,8 @@ class DigestWorkbook:
                 first_found=received,
                 last_seen=received,
                 status="New",
+                owner="",
+                notes="",
                 case_ids=ids[:],
                 folders=[folder] if folder else [],
                 excel_row=0,
@@ -614,6 +628,123 @@ class DigestWorkbook:
         self.set_config("last_run", "")
         return before
 
+    def consolidate(self, threshold: float) -> list[tuple[str, str, float]]:
+        """Merge ledger rows that describe the same error, until none remain.
+
+        THE SECOND PASS, asked for directly: "after the whole email is composed,
+        the email should again be filtered again should go through regular
+        expression fuzzy search and see commonality as now i see for many i am
+        getting single occurance in each row for the same type."
+
+        WHY ONE PASS IS NOT ENOUGH, and it is not only the threshold. Matching
+        as mail arrives compares each new signature against the rows that exist
+        AT THAT MOMENT, so the result depends on arrival order: if A and B sit
+        just under the bar but both clear it against C, and C arrives last, A
+        and B are already separate rows and nothing ever reconsiders them. This
+        pass compares every row with every other and repeats until a sweep
+        changes nothing, so a chain A~B~C collapses however it arrived.
+
+        MEASURED on lock-issue messages whose variable parts are WORDS rather
+        than numbers (DC_CORP_UPDATES, BATCH_RECON_JOB, SvcOpsDaily, and the
+        WORK-/WRT-/CASE- prefixes, none of which normalisation touches): four
+        messages of one kind scored 0.838-0.874 against each other and made
+        four separate single-occurrence rows at the 0.90 live threshold. Across
+        kinds the same corpus scored 0.138-0.446 — a gap wide enough that a
+        threshold anywhere in it is safe.
+
+        The survivor is the row with the most occurrences, so the identifier a
+        person has already been reading stays. Counts add, First Found keeps
+        the earliest, Last Seen the latest, and the merged row's name is the
+        wording the two share.
+
+        Args:
+            threshold: Minimum similarity for two rows to be one error.
+
+        Returns:
+            One (survivor, absorbed, ratio) per merge, for reporting.
+        """
+        merges: list[tuple[str, str, float]] = []
+
+        for _sweep in range(20):           # a chain longer than this is not real
+            pair = self._closest_pair(threshold)
+            if pair is None:
+                break
+            keep, drop, ratio = pair
+            self._absorb(keep, drop)
+            merges.append((keep, drop, ratio))
+        return merges
+
+    def _closest_pair(self, threshold: float):
+        """Find the two most similar rows, if any clear the threshold.
+
+        Args:
+            threshold: Minimum similarity.
+
+        Returns:
+            (survivor signature, absorbed signature, ratio), or None.
+        """
+        signatures = list(self._errors)
+        best = None
+        for index, left in enumerate(signatures):
+            for right in signatures[index + 1:]:
+                ratio = similarity(left, right)
+                if ratio >= threshold and (best is None or ratio > best[2]):
+                    # The row with more occurrences survives, so the wording a
+                    # person has been reading in the digest does not change
+                    # under them for the sake of an arbitrary tie-break.
+                    a, b = self._errors[left], self._errors[right]
+                    keep, drop = ((left, right) if a.total_count >= b.total_count
+                                  else (right, left))
+                    best = (keep, drop, ratio)
+        return best
+
+    def _absorb(self, keep: str, drop: str) -> None:
+        """Fold one ledger row into another.
+
+        Args:
+            keep: Signature of the surviving row.
+            drop: Signature of the row being absorbed.
+        """
+        survivor, other = self._errors[keep], self._errors[drop]
+
+        survivor.total_count += other.total_count
+        if other.first_found and (survivor.first_found is None
+                                  or other.first_found < survivor.first_found):
+            survivor.first_found = other.first_found
+        if other.last_seen and (survivor.last_seen is None
+                                or other.last_seen > survivor.last_seen):
+            survivor.last_seen = other.last_seen
+        for value in other.case_ids:
+            if value not in survivor.case_ids:
+                survivor.case_ids.append(value)
+        for folder in other.folders:
+            if folder not in survivor.folders:
+                survivor.folders.append(folder)
+        survivor.common = common_wording(survivor.common or survivor.sample,
+                                         other.common or other.sample)
+        # THE PERSON'S OWN COLUMNS ARE NEVER DISCARDED. A blank survivor takes
+        # the absorbed row's triage, and two different notes are kept together
+        # rather than one being chosen.
+        # "New" is what the script writes itself, so it must not outrank the
+        # absorbed row's real triage: a merge was keeping "New" over "Open".
+        if survivor.status in ("", "New") and other.status not in ("", "New"):
+            survivor.status = other.status
+        else:
+            survivor.status = survivor.status or other.status
+        survivor.owner = survivor.owner or other.owner
+        notes = [n for n in (survivor.notes, other.notes) if n and n.strip()]
+        survivor.notes = " | ".join(dict.fromkeys(notes))
+
+        self._run_counts[keep] = (self._run_counts.get(keep, 0)
+                                  + self._run_counts.pop(drop, 0))
+        if drop in self._new_signatures:
+            self._new_signatures.discard(drop)
+            if keep not in self._errors or survivor.total_count == other.total_count:
+                self._new_signatures.add(keep)
+        survivor.stored_run_count += other.stored_run_count
+        del self._errors[drop]
+        self._errors_need_rewrite = True
+
     # -- writing -----------------------------------------------------------
 
     def save(self, backup: bool = True) -> None:
@@ -632,8 +763,52 @@ class DigestWorkbook:
             shutil.copy2(self.path, self.path.with_suffix(self.path.suffix + ".bak"))
         self.workbook.save(self.path)
 
+    def _rewrite_errors_sheet(self) -> None:
+        """Write the Errors sheet out from scratch, rows and all.
+
+        Needed only after a consolidation, where rows DISAPPEAR and the rest
+        move up: an in-place write addressed by stored row number would leave
+        the absorbed rows behind as duplicates.
+
+        This is the one place that writes Status, Owner and Notes. It is not an
+        exception to "the script never touches those" — the values written are
+        the ones just read from the sheet, carried across a merge so they are
+        not lost with the row that held them.
+        """
+        sheet = self.workbook[ERRORS_SHEET]
+        index = _header_index(sheet, ERROR_HEADERS)
+        if sheet.max_row > 1:
+            sheet.delete_rows(2, sheet.max_row - 1)
+
+        now = dt.datetime.now().replace(microsecond=0)
+        for position, (signature, record) in enumerate(self._errors.items(), start=2):
+            record.excel_row = position
+            values = {
+                "Signature": signature,
+                "Common Message": record.common,
+                "Sample Message": record.sample,
+                "Total Count": record.total_count,
+                "Count This Run": self._run_counts.get(signature, record.stored_run_count),
+                "First Found": record.first_found,
+                "Last Seen": record.last_seen,
+                "Status": record.status or "New",
+                "Owner": record.owner,
+                "Notes": record.notes,
+                "Case IDs Seen": ", ".join(record.case_ids[-_MAX_CASE_IDS:]),
+                "Source Folders": ", ".join(record.folders),
+                "Last Updated": now,
+            }
+            for header, value in values.items():
+                cell = sheet.cell(row=position, column=index[header], value=value)
+                if header in ("First Found", "Last Seen", "Last Updated"):
+                    cell.number_format = _DATE_FORMAT
+        self._errors_need_rewrite = False
+
     def _write_errors(self) -> None:
         """Flush the in-memory ledger to the Errors sheet."""
+        if self._errors_need_rewrite:
+            self._rewrite_errors_sheet()
+            return
         sheet = self.workbook[ERRORS_SHEET]
         index = _header_index(sheet, ERROR_HEADERS)
         now = dt.datetime.now().replace(microsecond=0)

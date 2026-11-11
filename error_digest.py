@@ -127,6 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the error-start markers and whether each is enabled, then stop.",
     )
     parser.add_argument(
+        "--consolidate", action="store_true",
+        help="Run the merge pass over the existing ledger and stop. Reads no "
+             "email — use it to tidy a ledger full of single-occurrence rows.",
+    )
+    parser.add_argument(
         "--reset", action="store_true",
         help="Forget every processed email and empty the ledger, so the same mail "
              "can be read again. Keeps your Config and Keywords. Asks first.",
@@ -431,6 +436,27 @@ def main(argv: list[str] | None = None) -> int:
     # ONLY way to change a setting, which assumes Excel and a mouse. On a
     # machine where the terminal is all there is, the tool was unconfigurable
     # and its results unreadable — so it could be installed and never used.
+    if args.consolidate:
+        threshold = digest.get_float("consolidate_threshold", 0.80)
+        if threshold <= 0:
+            print("consolidate_threshold is 0 — the merge pass is switched off.")
+            return EXIT_OK
+        before = len(digest.known_signatures)
+        merges = digest.consolidate(threshold)
+        if not merges:
+            print(f"Nothing to merge at {threshold:.2f} — {before} distinct error(s).")
+            return EXIT_OK
+        for keep, drop, ratio in merges:
+            print(f"  {ratio:.3f}  merged  {drop[:46]!r}\n          into  {keep[:46]!r}")
+        try:
+            digest.save()
+        except PermissionError:
+            print(f"Could not write {args.workbook} — it is open in Excel. "
+                  "Nothing was changed.", file=sys.stderr)
+            return EXIT_FAILED
+        print(f"\n{before} -> {len(digest.known_signatures)} distinct error(s).")
+        return EXIT_OK
+
     if args.reset:
         counts = digest.counts_for_reset()
         if not (counts["errors"] or counts["occurrences"]):
@@ -578,6 +604,17 @@ def main(argv: list[str] | None = None) -> int:
             f"errors found {stats['occurrences']}, "
             f"new error types {stats['new_errors']}"
         )
+
+        # THE SECOND PASS, after everything is composed. Matching as mail
+        # arrives depends on arrival order, so rows that belong together can
+        # already be separate by the time the run ends; this reconsiders every
+        # pair once the full picture exists.
+        threshold = digest.get_float("consolidate_threshold", 0.80)
+        if threshold > 0:
+            merges = digest.consolidate(threshold)
+            if merges:
+                print(f"  consolidated {len(merges)} row(s) into others "
+                      f"at >= {threshold:.2f} similarity")
 
         if args.dry_run:
             print("Dry run - the workbook was not written and last_run was not advanced.")
