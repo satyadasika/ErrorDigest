@@ -118,6 +118,9 @@ class ErrorRow:
         case_ids: Identifiers recorded against this error.
         folders: Folders this error has arrived in.
         excel_row: 1-based row number in the sheet.
+        stored_run_count: "Count This Run" as the sheet holds it, i.e. from the
+            PREVIOUS run. This is what lets --draft-only rebuild a digest in a
+            fresh process, where the in-memory counters are necessarily empty.
     """
 
     signature: str
@@ -129,6 +132,7 @@ class ErrorRow:
     case_ids: list[str]
     folders: list[str]
     excel_row: int
+    stored_run_count: int = 0
 
 
 class DigestWorkbook:
@@ -349,6 +353,7 @@ class DigestWorkbook:
                 case_ids=_split_cell(sheet.cell(row=row, column=index["Case IDs Seen"]).value),
                 folders=_split_cell(sheet.cell(row=row, column=index["Source Folders"]).value),
                 excel_row=row,
+                stored_run_count=_as_int(sheet.cell(row=row, column=index["Count This Run"]).value),
             )
 
     def _load_entry_ids(self) -> None:
@@ -412,7 +417,10 @@ class DigestWorkbook:
         Returns:
             The occurrence count, 0 if it did not occur.
         """
-        return self._run_counts.get(signature, 0)
+        if self._run_counts:
+            return self._run_counts.get(signature, 0)
+        record = self._errors.get(signature)
+        return record.stored_run_count if record else 0
 
     def rows_this_run(self) -> list[ErrorRow]:
         """Return the ledger rows that had at least one occurrence this run.
@@ -423,10 +431,16 @@ class DigestWorkbook:
         Returns:
             The matching rows, in no particular order.
         """
-        return [
-            record for signature, record in self._errors.items()
-            if self._run_counts.get(signature, 0) > 0
-        ]
+        if self._run_counts:
+            return [
+                record for signature, record in self._errors.items()
+                if self._run_counts.get(signature, 0) > 0
+            ]
+        # No run happened in THIS process — --draft-only. Fall back to the count
+        # the sheet carries from the previous run, which is what the person means
+        # by "the last run". Without this the draft said "No errors were found"
+        # while its own message promised the last run's figures.
+        return [record for record in self._errors.values() if record.stored_run_count > 0]
 
     # -- recording ---------------------------------------------------------
 
@@ -500,6 +514,66 @@ class DigestWorkbook:
             received, folder, subject, sender, signature,
             sample_text, ", ".join(ids), entry_id, run_id,
         ))
+
+    def counts_for_reset(self) -> dict[str, int]:
+        """Report what a reset would delete, so it can be stated before it happens.
+
+        Returns:
+            Counts of error rows, occurrence rows, and rows carrying the
+            person's own triage text — that last one is the number that should
+            make someone think twice, so it is reported separately.
+        """
+        occurrences = max(0, self.workbook[OCCURRENCES_SHEET].max_row - 1)
+        sheet = self.workbook[ERRORS_SHEET]
+        index = _header_index(sheet, ERROR_HEADERS)
+        triaged = 0
+        for row in range(2, sheet.max_row + 1):
+            if not sheet.cell(row=row, column=index["Signature"]).value:
+                continue
+            owned = [
+                str(sheet.cell(row=row, column=index[name]).value or "").strip()
+                for name in ("Status", "Owner", "Notes")
+            ]
+            # "New" is what the script writes itself, so it is not triage.
+            if any(value and value != "New" for value in owned):
+                triaged += 1
+        return {
+            "errors": len(self._errors),
+            "occurrences": occurrences,
+            "triaged": triaged,
+        }
+
+    def reset(self) -> dict[str, int]:
+        """Forget every processed email and empty the ledger.
+
+        BOTH SHEETS ARE CLEARED TOGETHER, deliberately. Clearing only the
+        Occurrences sheet would let the same emails be read again while the
+        Errors sheet kept its old totals, so every count would silently double —
+        a wrong number that looks like a right one, which is worse than the
+        inconvenience this exists to remove.
+
+        Config and Keywords are untouched: a reset is about what has been SEEN,
+        never about how the tool is set up.
+
+        Returns:
+            What was deleted, from counts_for_reset() taken before the delete.
+        """
+        before = self.counts_for_reset()
+
+        errors = self.workbook[ERRORS_SHEET]
+        if errors.max_row > 1:
+            errors.delete_rows(2, errors.max_row - 1)
+        occurrences = self.workbook[OCCURRENCES_SHEET]
+        if occurrences.max_row > 1:
+            occurrences.delete_rows(2, occurrences.max_row - 1)
+
+        self._errors.clear()
+        self._seen_entry_ids.clear()
+        self._run_counts.clear()
+        self._new_signatures.clear()
+        self._pending_occurrences.clear()
+        self.set_config("last_run", "")
+        return before
 
     # -- writing -----------------------------------------------------------
 

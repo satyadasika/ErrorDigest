@@ -125,6 +125,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--show-keywords", action="store_true",
         help="Print the error-start markers and whether each is enabled, then stop.",
     )
+    parser.add_argument(
+        "--reset", action="store_true",
+        help="Forget every processed email and empty the ledger, so the same mail "
+             "can be read again. Keeps your Config and Keywords. Asks first.",
+    )
+    parser.add_argument(
+        "--yes", action="store_true",
+        help="Answer yes to the --reset confirmation. For scripts; think before using it.",
+    )
     return parser
 
 
@@ -398,6 +407,45 @@ def main(argv: list[str] | None = None) -> int:
     # ONLY way to change a setting, which assumes Excel and a mouse. On a
     # machine where the terminal is all there is, the tool was unconfigurable
     # and its results unreadable — so it could be installed and never used.
+    if args.reset:
+        counts = digest.counts_for_reset()
+        if not (counts["errors"] or counts["occurrences"]):
+            print("Nothing to reset — the ledger is already empty.")
+            return EXIT_OK
+
+        print(f"This will delete, from {args.workbook}:")
+        print(f"    {counts['errors']:>6} error row(s)")
+        print(f"    {counts['occurrences']:>6} occurrence row(s)")
+        if counts["triaged"]:
+            # Named separately because this is the part that cannot be
+            # reconstructed by running the tool again.
+            print(f"    {counts['triaged']:>6} of those errors carry YOUR Status / Owner / Notes")
+        print("\nYour Config and Keywords are NOT touched.")
+        print("A backup copy is written beside the workbook as .bak before anything is deleted.")
+
+        if not args.yes:
+            try:
+                answer = input("\nType 'reset' to confirm: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\nCancelled — nothing was changed.")
+                return EXIT_OK
+            if answer != "reset":
+                print("Cancelled — nothing was changed.")
+                return EXIT_OK
+
+        deleted = digest.reset()
+        try:
+            # backup=True on purpose: the .bak is the undo for a reset.
+            digest.save(backup=True)
+        except PermissionError:
+            print(f"Could not write {args.workbook} — it is open in Excel. "
+                  "Close it and try again. NOTHING was deleted.", file=sys.stderr)
+            return EXIT_FAILED
+        print(f"\nReset. Removed {deleted['errors']} error row(s) and "
+              f"{deleted['occurrences']} occurrence row(s); last_run cleared.")
+        print("The next run will read your mail from scratch.")
+        return EXIT_OK
+
     if args.set_values:
         from workbook import DEFAULT_CONFIG
 
